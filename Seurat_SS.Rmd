@@ -1,0 +1,209 @@
+---
+title: "Seraut_SS"
+author: "Beatriz Val"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(Seurat)
+library(patchwork)
+library(presto)
+library(ggplot2)
+```
+
+### **Load data**
+
+```{r}
+srat_ss <- readRDS("Hong2021_SS1_srat.RDS")
+srat_ss@assays$RNA@counts[1:5,1:5]
+```
+
+\
+
+```{r}
+gene_rename_tab = data.frame("original" = rownames(srat_ss[["RNA"]]),
+                               "new" = sapply(strsplit(rownames(srat_ss[["RNA"]]), "-"), 
+                                              function(x) paste0(x[-1], collapse = "-")))
+  gene_rename_tab$new[gene_rename_tab$new==""] = gene_rename_tab$original[gene_rename_tab$new==""]
+  
+  counts_gn = DelayedArray::rowsum(srat_ss[["RNA"]]@counts, group = gene_rename_tab$new)
+  colnames(counts_gn) = colnames(srat_ss[["RNA"]])
+  
+  srat_ss = CreateSeuratObject(counts = counts_gn, meta.data = srat_ss@meta.data)
+```
+
+## Standard pre-processing workflow
+
+### QC and selecting cells for further analysis
+
+Compute mitochondrial QC metrics
+
+```{r}
+# The [[ operator can add columns to object metadata. This is a great place to stash QC stats
+srat_ss[["percent.mt"]] <- PercentageFeatureSet(object = srat_ss, pattern = '^MT-')
+head(srat_ss)
+```
+
+```{r}
+# Visualize QC metrics as a violin plot
+VlnPlot(srat_ss, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+```
+
+Cut-offs: 200, 2500 and 20
+
+```{r}
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+
+plot1 <- FeatureScatter(srat_ss, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(srat_ss, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+```
+
+```{r}
+#srat_ss <- subset(srat_ss, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+srat_ss <- srat_ss[,srat_ss$nFeature_RNA > 200 & srat_ss$nFeature_RNA < 2500 & srat_ss$percent.mt < 20]
+```
+
+```{r}
+saveRDS(srat_ss, file = "srat_ss.rds")
+```
+
+## Normalizing the data
+
+```{r}
+srat_ss <- NormalizeData(srat_ss, normalization.method = "LogNormalize", scale.factor = 10000)
+```
+
+Find 10 most variable genes
+
+```{r}
+srat_ss<- FindVariableFeatures(srat_ss, selection.method = "vst", nfeatures = 2000)
+
+srat_ss$orig.ident
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(srat_ss), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(srat_ss)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+```
+
+## Scaling the data
+
+Linear tranformation
+
+```{r}
+all.genes <- rownames(srat_ss)
+srat_ss <- ScaleData(srat_ss, features = all.genes)
+
+```
+
+Principal component analysis
+
+```{r}
+srat_ss <- RunPCA(srat_ss, features = VariableFeatures(object = srat_ss))
+```
+
+```{r}
+# Examine and visualize PCA results a few different ways
+print(srat_ss[["pca"]], dims = 1:5, nfeatures = 5)
+```
+
+```{r}
+VizDimLoadings(srat_ss, dims = 1:2, reduction = "pca")
+```
+
+```{r}
+DimPlot(srat_ss, reduction = "pca") + NoLegend()
+```
+
+```{r}
+DimHeatmap(srat_ss, dims = 1, cells = 500, balanced = TRUE)
+```
+
+```{r}
+DimHeatmap(srat_ss, dims = 1:15, cells = 500, balanced = TRUE)
+```
+
+```{r}
+ElbowPlot(srat_ss, ndims = 50)
+```
+
+Cutoff - 20
+
+```{r}
+srat_ss <- FindNeighbors(srat_ss, dims = 1:20)
+srat_ss <- FindClusters(srat_ss, resolution = 0.5)
+head(Idents(srat_ss), 5)
+```
+
+## Run non-linear dimensional reduction (UMAP/tSNE)
+
+```{r}
+srat_ss <- RunUMAP(srat_ss, dims = 1:20)
+# note that you can set `label = TRUE` or use the LabelClusters function to help label individual clusters
+DimPlot(srat_ss, reduction = "umap", label = T)
+```
+
+```{r}
+saveRDS(srat_ss, file = "umap_ss.rds")
+```
+
+## Finding differentially expressed features (cluster biomarkers)
+
+```{r}
+# find markers for every cluster compared to all remaining cells, report only the positive
+# ones
+srat_ss.markers <- FindAllMarkers(srat_ss, only.pos = TRUE)
+srat_ss.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1)
+```
+
+```{r}
+cluster0.markers <- FindMarkers(srat_ss, ident.1 = 0, logfc.threshold = 0.25, test.use = "roc", only.pos = TRUE)
+```
+
+```{r}
+VlnPlot(srat_ss, features = c("MS4A1", "CD79A"))
+```
+
+```{r}
+# you can plot raw counts as well
+VlnPlot(srat_ss, features = c("NKG7", "PF4"), slot = "counts", log = TRUE)
+```
+
+```{r}
+FeaturePlot(srat_ss, features = c("MS4A1", "GNLY", "CD3E", "CD14", "FCER1A", "FCGR3A", "LYZ", "PPBP",
+    "CD8A"))
+```
+
+```{r}
+srat_ss.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 10) %>%
+    ungroup() -> top10
+DoHeatmap(srat_ss, features = top10$gene) + NoLegend()
+```
+
+```{r}
+new.cluster.ids <- c("Naive CD4 T", "CD14+ Mono", "Memory CD4 T", "B", "CD8 T", "FCGR3A+ Mono", "NK", "DC", "Platelet", '9', '10', '11', '12', '13', '14')
+names(new.cluster.ids) <- levels(srat_ss)
+srat_ss <- RenameIdents(srat_ss, new.cluster.ids)
+DimPlot(srat_ss, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+```{r}
+plot <- DimPlot(srat_ss, reduction = "umap", label = TRUE, label.size = 4.5) + xlab("UMAP 1") + ylab("UMAP 2") +
+    theme(axis.title = element_text(size = 18), legend.text = element_text(size = 18)) + guides(colour = guide_legend(override.aes = list(size = 10)))
+ggsave(filename = "srat_umap.jpg", height = 7, width = 12, plot = plot, quality = 50)
+```
+
+```{r}
+saveRDS(srat_ss, file = "srat_ss_final.rds")
+```
