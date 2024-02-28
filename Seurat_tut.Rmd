@@ -1,5 +1,4 @@
 ---
-?---
 title: "Seurat_tutorial"
 author: "Beatriz Val"
 date: "`r Sys.Date()`"
@@ -18,7 +17,7 @@ library(ggplot2)
 ### **Load data**
 
 ```{r}
-srat_hc <- readRDS("Hong2021_HC1_srat.RDS")
+srat_hc <- readRDS("Data/Hong2021_HC1_srat.RDS")
 srat_hc@assays$RNA@counts[1:5,1:5]
 ```
 
@@ -43,14 +42,20 @@ gene_rename_tab = data.frame("original" = rownames(srat_hc[["RNA"]]),
 Compute mitochondrial QC metrics
 
 ```{r}
-# The [[ operator can add columns to object metadata. This is a great place to stash QC stats
 srat_hc[["percent.mt"]] <- PercentageFeatureSet(object = srat_hc, pattern = '^MT-')
 head(srat_hc)
 ```
 
 ```{r}
 # Visualize QC metrics as a violin plot
-VlnPlot(srat_hc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+plot <- VlnPlot(srat_hc, features = c("nFeature_RNA")) + ggtitle('RNA Feature') + xlab(NULL) + theme(legend.position = 'none', axis.text.x = element_blank())
+plot1 <- VlnPlot(srat_hc, features = c("nCount_RNA")) + ggtitle('RNA Count') + xlab(NULL) + theme(legend.position = 'none', axis.text.x = element_blank())
+plot2 <- VlnPlot(srat_hc, features = c("percent.mt")) + ggtitle('Mitochondrial Percentage') + xlab(NULL) + theme(legend.position = 'none', axis.text.x = element_blank())
+
+plots <- plot+plot1+plot2 + plot_layout(ncol = 3, widths = 4, heights = 7, axes = 'collect')
+
+ggsave(filename = 'Final_figs/Vln_hc.jpg', height = 10, width =16 , plot = plots, quality = 50)
+plots
 ```
 
 Cut-offs: 200, 2500 and 20
@@ -78,6 +83,8 @@ saveRDS(srat_hc, file = "srat_hc.rds")
 srat_hc <- NormalizeData(srat_hc, normalization.method = "LogNormalize", scale.factor = 10000)
 ```
 
+### Find Variable Features
+
 ```{r}
 srat_hc<- FindVariableFeatures(srat_hc, selection.method = "vst", nfeatures = 2000)
 
@@ -91,11 +98,16 @@ plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
 plot1 + plot2
 ```
 
+### Scaling the data
+
 ```{r}
 all.genes <- rownames(srat_hc)
 srat_hc <- ScaleData(srat_hc, features = all.genes)
 
+
 ```
+
+### Linear Dimensional Reduction - PCA
 
 ```{r}
 srat_hc <- RunPCA(srat_hc, features = VariableFeatures(object = srat_hc))
@@ -123,10 +135,14 @@ DimHeatmap(srat_hc, dims = 1:15, cells = 500, balanced = TRUE)
 ```
 
 ```{r}
-ElbowPlot(srat_hc, ndims = 50)
+elbowplot <- ElbowPlot(srat_hc, ndims = 50) + ggtitle('Dimensionality') + theme(plot.title = element_text(hjust = 0.5, vjust = 1.5))
+ggsave(filename = 'Final_figs/elbowplot.jpg', height = 7, width = 12, plot = elbowplot, quality = 50)
+elbowplot
 ```
 
 Cutoff - 15
+
+## Cluster the cells
 
 ```{r}
 srat_hc <- FindNeighbors(srat_hc, dims = 1:15)
@@ -139,14 +155,24 @@ head(Idents(srat_hc), 5)
 ```{r}
 srat_hc <- RunUMAP(srat_hc, dims = 1:15)
 # note that you can set `label = TRUE` or use the LabelClusters function to help label individual clusters
-DimPlot(srat_hc, reduction = "umap")
+dimplot <- DimPlot(srat_hc, reduction = "umap", label = T) +
+  xlab("UMAP 1") +
+  ylab("UMAP 2") +
+  theme(axis.title = element_text(size = 18), axis.text = element_blank(), axis.ticks = element_blank(), legend.text = element_text(size = 18)) +
+  guides(colour = guide_legend(override.aes = list(size = 10)))
+
+
+ggsave(filename = 'Final_figs/clusters_hc.jpg', height = 7, width = 12, plot = dimplot, quality = 50)
+dimplot
 ```
 
 ```{r}
 saveRDS(srat_hc, file = "umap.rds")
 ```
 
-## Finding differentially expressed features (cluster biomarkers)
+## Annotations
+
+### Finding deferentially expressed features (cluster biomarkers)
 
 ```{r}
 # find all markers of cluster 2
@@ -167,10 +193,13 @@ srat_hc.markers <- FindAllMarkers(srat_hc, only.pos = TRUE)
 srat_hc.markers %>%
     group_by(cluster) %>%
     dplyr::filter(avg_log2FC > 1)
+
+View(srat_hc.markers)
 ```
 
 ```{r}
-cluster0.markers <- FindMarkers(srat_hc, ident.1 = 0, logfc.threshold = 0.25, test.use = "roc", only.pos = TRUE)
+cluster8.markers <- FindMarkers(srat_hc, ident.1 = 8, logfc.threshold = 0.25, test.use = "roc", only.pos = TRUE)
+cluster8.markers
 ```
 
 ```{r}
@@ -183,8 +212,59 @@ VlnPlot(srat_hc, features = c("NKG7", "PF4"), slot = "counts", log = TRUE)
 ```
 
 ```{r}
-FeaturePlot(srat_hc, features = c("MS4A1", "GNLY", "CD3E", "CD14", "FCER1A", "FCGR3A", "LYZ", "PPBP",
-    "CD8A"))
+genes = c("MS4A1", "GNLY", "CD3E", "CD4", "CD8A")
+
+featureplot <- list()
+
+
+for (gene in genes){
+plot <- FeaturePlot(srat_hc, features = gene ) +
+  scale_color_gradient(low = 'lightgrey', high = '#4B0082', limits = c(0, 6))+
+  guides(color = "none") +
+  xlab(NULL) +
+  ylab(NULL)
+if (length(featureplot) != 0 && length(featureplot) != 3) {
+  plot <-  plot +
+  theme_void() + 
+  theme(plot.title = element_text(face = 'bold', hjust = 0.5, vjust = 0.5))
+  }
+
+featureplot[[gene]] <- plot
+}
+
+
+
+featureplot[[1]] <- featureplot[[1]] +
+  theme(axis.text = element_blank(), axis.ticks = element_blank()) +
+  xlab('UMAP 1') +
+  ylab('UMAP 2')
+
+featureplot[[4]] <- featureplot[[4]] + 
+  theme(axis.text = element_blank(), axis.ticks = element_blank()) +
+  xlab('UMAP 1') +
+  ylab('UMAP 2')
+
+featureplot[['LYZ']] <- FeaturePlot(srat_hc, features = 'LYZ' ) +
+  xlab(NULL) +
+  ylab(NULL) +
+  theme_void() +
+  theme(plot.title = element_text(face = 'bold', hjust = 0.5, vjust = 0.5)) +
+  scale_color_gradient(low = 'lightgrey', high = '#4B0082', limits = c(0, 6))
+  
+
+
+
+featureplots <- featureplot[[1]] +
+  featureplot[[2]] +
+  featureplot[[3]] +
+  featureplot[[4]] +
+  featureplot[[5]] +
+  featureplot[[6]] +
+  plot_layout(ncol = 3, nrow = 2, widths = 6, heights = 4, axes = 'collect_x') 
+
+
+ggsave(filename = 'Final_figs/markers_for_cell_type_hc.jpg', height = 7, width = 12, plot = featureplots, quality = 50)
+featureplots
 ```
 
 ```{r}
@@ -197,18 +277,70 @@ DoHeatmap(srat_hc, features = top10$gene) + NoLegend()
 ```
 
 ```{r}
-new.cluster.ids <- c("Naive CD4 T", "CD14+ Mono", "Memory CD4 T", "B", "CD8 T", "FCGR3A+ Mono", "NK", "DC", "Platelet", '9', '10')
+new.cluster.ids <- c("CD4", "CD4", "CD8", "Mono-Mac", "NK", "B cells", "CD8", "Platelets", "Endothelial Cells", 'Mono-Mac', 'Mast cells_Basophils')
 names(new.cluster.ids) <- levels(srat_hc)
 srat_hc <- RenameIdents(srat_hc, new.cluster.ids)
 DimPlot(srat_hc, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
 ```
 
 ```{r}
-plot <- DimPlot(srat_hc, reduction = "umap", label = TRUE, label.size = 4.5) + xlab("UMAP 1") + ylab("UMAP 2") +
-    theme(axis.title = element_text(size = 18), legend.text = element_text(size = 18)) + guides(colour = guide_legend(override.aes = list(size = 10)))
-ggsave(filename = "srat_umap.jpg", height = 7, width = 12, plot = plot, quality = 50)
+plot <- DimPlot(srat_hc, reduction = "umap", label = TRUE, repel = T, label.size = 4.5) +
+  xlab("UMAP 1") +
+  ylab("UMAP 2") +
+  theme(axis.title = element_text(size = 18), axis.text = element_blank(), axis.ticks = element_blank(), legend.text = element_text(size = 18)) +
+  guides(colour = guide_legend(override.aes = list(size = 10)))
+
+
+ggsave(filename = "Final_figs/Annotations_hc.jpg", height = 7, width = 12, plot = plot, quality = 50)
+```
+
+```{r}
+srat_hc[['Ident']] <- Idents(srat_hc)
 ```
 
 ```{r}
 saveRDS(srat_hc, file = "srat_hc_final.rds")
+```
+
+Create info to put in chatGPT to help define the clusters
+
+```{r}
+annotationPrompt = function(presto_df, n = 10, 
+                            pval_thr = 0.05, pct_diff = 20, logFC_thr = 0.2,
+                            add_info = NULL, print.it = T){
+  require(dplyr)
+  
+  topmk = presto_df |>
+    group_by(cluster) |> # for each cluster
+    filter(p_val_adj<=pval_thr) |> # only p-value below 0.05
+    filter(pct.1>(pct.2+pct_diff)) |> 
+    filter(avg_log2FC>logFC_thr) |> 
+    arrange(-avg_log2FC) |>
+    top_n(n = n, wt = avg_log2FC) # top genes per cluster, ranked by logFC
+  
+  prompt = "I have performed a scRNA-seq analysis, and have encountered various clusters, for which I calculated the marker genes. The top marker genes for each cluster are as follows:\n"
+  for(cl in unique(topmk$cluster)){
+    prompt = paste0(prompt, " - cluster ", cl, ": ", 
+                    paste0(topmk$gene[topmk$cluster==cl], collapse = ", "), "\n")
+  }
+  
+  if(!is.null(add_info)){
+    prompt = paste0(prompt, 
+                    "\nTo interpret these clusters, these additional sample characteristics should be considered: ", 
+                    paste0(sapply(names(add_info), function(x) paste0(x, ": ", add_info[x])), 
+                           collapse = "; "), "\n")
+  }
+  
+  prompt = paste0(prompt, 
+                  "Can you tell me what are the most likely cell types that each cluster matches to? And report the top 5 genes used to reach this annotation.")
+  
+  if(print.it){
+    cat(prompt)
+  }
+  return(prompt)
+}
+```
+
+```{r}
+annotationPrompt(srat_hc.markers, n = 25, pct_diff = 0.2, add_info = list('tissue' = 'blood'))
 ```

@@ -17,7 +17,7 @@ library(ggplot2)
 ### **Load data**
 
 ```{r}
-srat_ss <- readRDS("Hong2021_SS1_srat.RDS")
+srat_ss <- readRDS("Data/Hong2021_SS1_srat.RDS")
 srat_ss@assays$RNA@counts[1:5,1:5]
 ```
 
@@ -49,7 +49,9 @@ head(srat_ss)
 
 ```{r}
 # Visualize QC metrics as a violin plot
-VlnPlot(srat_ss, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+plot <- VlnPlot(srat_ss, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+ggsave(filename = 'Final_figs/Vln_ss.jpg', height = 7, width = 12, plot = plot, quality = 50)
+plot
 ```
 
 Cut-offs: 200, 2500 and 20
@@ -153,15 +155,15 @@ DimPlot(srat_ss, reduction = "umap", label = T)
 saveRDS(srat_ss, file = "umap_ss.rds")
 ```
 
-## Finding differentially expressed features (cluster biomarkers)
+## Finding differentialy expressed features (cluster biomarkers)
 
 ```{r}
 # find markers for every cluster compared to all remaining cells, report only the positive
 # ones
 srat_ss.markers <- FindAllMarkers(srat_ss, only.pos = TRUE)
-srat_ss.markers %>%
+View(srat_ss.markers %>%
     group_by(cluster) %>%
-    dplyr::filter(avg_log2FC > 1)
+    dplyr::filter(avg_log2FC > 1))
 ```
 
 ```{r}
@@ -178,8 +180,7 @@ VlnPlot(srat_ss, features = c("NKG7", "PF4"), slot = "counts", log = TRUE)
 ```
 
 ```{r}
-FeaturePlot(srat_ss, features = c("MS4A1", "GNLY", "CD3E", "CD14", "FCER1A", "FCGR3A", "LYZ", "PPBP",
-    "CD8A"))
+FeaturePlot(srat_ss, features = c("MS4A1", "GNLY", "CD3E", "CD4", "CD8A", "LYZ"))
 ```
 
 ```{r}
@@ -192,18 +193,63 @@ DoHeatmap(srat_ss, features = top10$gene) + NoLegend()
 ```
 
 ```{r}
-new.cluster.ids <- c("Naive CD4 T", "CD14+ Mono", "Memory CD4 T", "B", "CD8 T", "FCGR3A+ Mono", "NK", "DC", "Platelet", '9', '10', '11', '12', '13', '14')
+new.cluster.ids <- c("CD4", "NK", "CD8", "B cells", "Mono-Mac", "NK", "NK", "CD8", "CD8", 'Mono-Mac', 'Platelets', 'Mono-Mac', 'Mast cells', 'HSC/Endothelial cells', 'Platelets/Epithelial cells')
 names(new.cluster.ids) <- levels(srat_ss)
 srat_ss <- RenameIdents(srat_ss, new.cluster.ids)
 DimPlot(srat_ss, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
 ```
 
 ```{r}
+srat_ss[['Ident']] <- Idents(srat_ss)
+```
+
+```{r}
 plot <- DimPlot(srat_ss, reduction = "umap", label = TRUE, label.size = 4.5) + xlab("UMAP 1") + ylab("UMAP 2") +
     theme(axis.title = element_text(size = 18), legend.text = element_text(size = 18)) + guides(colour = guide_legend(override.aes = list(size = 10)))
-ggsave(filename = "srat_umap.jpg", height = 7, width = 12, plot = plot, quality = 50)
+ggsave(filename = "srat_ss_umap.jpg", height = 7, width = 12, plot = plot, quality = 50)
 ```
 
 ```{r}
 saveRDS(srat_ss, file = "srat_ss_final.rds")
+```
+
+```{r}
+annotationPrompt = function(presto_df, n = 10, 
+                            pval_thr = 0.05, pct_diff = 20, logFC_thr = 0.2,
+                            add_info = NULL, print.it = T){
+  require(dplyr)
+  
+  topmk = presto_df |>
+    group_by(cluster) |> # for each cluster
+    filter(p_val_adj<=pval_thr) |> # only p-value below 0.05
+    filter(pct.1>(pct.2+pct_diff)) |> 
+    filter(avg_log2FC>logFC_thr) |> 
+    arrange(-avg_log2FC) |>
+    top_n(n = n, wt = avg_log2FC) # top genes per cluster, ranked by logFC
+  
+  prompt = "I have performed a scRNA-seq analysis, and have encountered various clusters, for which I calculated the marker genes. The top marker genes for each cluster are as follows:\n"
+  for(cl in unique(topmk$cluster)){
+    prompt = paste0(prompt, " - cluster ", cl, ": ", 
+                    paste0(topmk$gene[topmk$cluster==cl], collapse = ", "), "\n")
+  }
+  
+  if(!is.null(add_info)){
+    prompt = paste0(prompt, 
+                    "\nTo interpret these clusters, these additional sample characteristics should be considered: ", 
+                    paste0(sapply(names(add_info), function(x) paste0(x, ": ", add_info[x])), 
+                           collapse = "; "), "\n")
+  }
+  
+  prompt = paste0(prompt, 
+                  "Can you tell me what are the most likely cell types that each cluster matches to? And report the top 5 genes used to reach this annotation.")
+  
+  if(print.it){
+    cat(prompt)
+  }
+  return(prompt)
+}
+```
+
+```{r}
+annotationPrompt(srat_ss.markers, n = 25, pct_diff = 0.2, add_info = list('tissue' = 'blood'))
 ```

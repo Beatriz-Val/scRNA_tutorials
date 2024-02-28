@@ -1,0 +1,403 @@
+---
+title: "Integration"
+author: Beatriz Val
+Date: "`r Sys.Date()`"
+output: html_notebook
+---
+
+```{r}
+library(Seurat)
+library(patchwork)
+library(ggplot2)
+library(cowplot)
+library(pheatmap)
+library(ComplexHeatmap)
+library(circlize)
+library(EnhancedVolcano)
+```
+
+**Merge Objects**
+
+```{r}
+# Read objects
+srat_hc = readRDS("srat_hc_final.rds")
+srat_ss = readRDS("srat_ss_final.rds")
+
+# Merge two Seurat objects
+merged_obj <- merge(x = srat_hc, y = srat_ss)
+
+```
+
+```{r}
+# Add a column with the condition
+
+merged_obj[['Condition']] <- c(rep('hc', ncol(srat_hc) ),rep('ss', ncol(srat_ss)))
+```
+
+Normalize data regressing nCount and set PCA components in the merged object
+
+```{r}
+#merged_obj <- readRDS("merged_hc_ss.rds")
+
+merged_obj <- NormalizeData(merged_obj)
+merged_obj <- FindVariableFeatures(merged_obj)
+merged_obj <- ScaleData(merged_obj,  vars.to.regress = 'nCount_RNA')
+merged_obj <- RunPCA(merged_obj, features = VariableFeatures(merged_obj))
+
+```
+
+```{r}
+saveRDS(merged_obj, file = "merged_hc_ss.rds")
+```
+
+#### Unintegrated clusters
+
+```{r}
+merged_obj <- FindNeighbors(merged_obj, dims = 1:30, reduction = "pca")
+merged_obj <- FindClusters(merged_obj, resolution = 2, cluster.name = "unintegrated_clusters")
+```
+
+```{r}
+merged_obj <- RunUMAP(merged_obj, dims = 1:30, reduction = "pca", reduction.name = "umap.unintegrated")
+DimPlot(merged_obj, reduction = "umap.unintegrated", group.by = c('condition', "seurat_clusters"))
+```
+
+**Integration**
+
+```{r}
+merged_obj <- IntegrateLayers(object = merged_obj, method = CCAIntegration, orig.reduction = "pca", new.reduction = "integrated.cca",  verbose = FALSE)
+
+```
+
+```{r}
+
+# re-join layers after integration
+merged_obj <- JoinLayers(merged_obj, assay='RNA')
+
+merged_obj <- FindNeighbors(merged_obj, reduction = "integrated.cca", dims = 1:30)
+merged_obj <- FindClusters(merged_obj, resolution = 1)
+```
+
+```{r}
+merged_obj <- RunUMAP(merged_obj, dims = 1:30, reduction = "integrated.cca")
+```
+
+```{r}
+merged_obj.markers <- FindAllMarkers(merged_obj, only.pos = TRUE)
+```
+
+```{r}
+saveRDS(merged_obj, file = "merged_hc_ss_integrated.rds")
+```
+
+```{r}
+merged_obj <- readRDS('merged_hc_ss_integrated.rds')
+```
+
+```{r}
+# Visualization
+DimPlot(merged_obj, reduction = "umap", group.by = c("Condition", "seurat_clusters"), shuffle = T, label = T, repel = T) +  theme(legend.position = 'bottom')
+```
+
+```{r}
+DimPlot(merged_obj, reduction = "umap", split.by = "Condition", label = T)
+```
+
+```{r}
+DimPlot(merged_obj, reduction = "umap", group.by = c("Condition", "Ident", 'seurat_clusters'), shuffle = T, label = T, repel = T) + theme(legend.position = "bottom")
+
+```
+
+**Heatmap**
+
+```{r}
+# Table comparing the annoted cell types of the merged objects with thw new clusters
+cell_vs_clusters <- table(merged_obj@meta.data$Ident,merged_obj@meta.data$seurat_clusters)
+
+## Heatmap
+# Set color
+col_fun = colorRamp2(c(0, max(cell_vs_clusters)), c("white", "red"))
+
+# Heatmap with values (fontsize according with the value)
+Heatmap(cell_vs_clusters, name = 'mat', col = col_fun,  cell_fun =  function(j, i, x, y, width, height, fill) {
+        if(cell_vs_clusters[i, j] > 0)
+            grid.text( sprintf("%.0f", cell_vs_clusters[i, j]),
+      x = x,
+      y = y,
+      just = "centre",
+      gp = gpar(fontsize = max(5, abs(cell_vs_clusters[i, j]) * 0.008))
+    )
+}, column_title = "Heatmap Cell Types vs Clusters with values")
+
+```
+
+```{r}
+# Define porportions
+perc_table <- prop.table(cell_vs_clusters, margin = 2)
+
+# Color
+col_fun = colorRamp2(c(0, 1), c("white", "red"))
+
+
+# Heatmap with percentages (fontsize according with the value)
+Heatmap(perc_table, name = 'mat', col = col_fun,  cell_fun =  function(j, i, x, y, width, height, fill) {
+  perc <- perc_table[i,j]*100
+        if(perc > 0)
+            grid.text( sprintf("%.0f", perc),
+      x = x,
+      y = y,
+      just = "centre",
+      gp = gpar(fontsize = max(10, perc * 0.15))
+    )
+}, column_title = "Heatmap Cell Types vs Clusters with %", rect_gp = gpar(col = "black", lwd = 1))
+
+```
+
+```{r}
+ # Plot with the metadata columns 
+FeaturePlot(merged_obj, features = c("nCount_RNA", "nFeature_RNA", "iscell_dd", "iscell_ed", "percent.mt"))
+```
+
+**Identify conserved cell type markers**
+
+```{r}
+Idents(merged_obj) <- "seurat_clusters"
+nk.markers <- FindConservedMarkers(merged_obj, ident.1 = '5', grouping.var = "Condition", verbose = FALSE)
+head(nk.markers)
+```
+
+```{r}
+# Function for chatGPT
+
+annotationPrompt = function(presto_df, n = 10, 
+                            pval_thr = 0.05, pct_diff = 20, logFC_thr = 0.2,
+                            add_info = NULL, print.it = T){
+  require(dplyr)
+  
+  topmk = presto_df |>
+    group_by(cluster) |> # for each cluster
+    filter(p_val_adj<=pval_thr) |> # only p-value below 0.05
+    filter(pct.1>(pct.2+pct_diff)) |> 
+    filter(avg_log2FC>logFC_thr) |> 
+    arrange(-avg_log2FC) |>
+    top_n(n = n, wt = avg_log2FC) # top genes per cluster, ranked by logFC
+  
+  prompt = "I have performed a scRNA-seq analysis, and have encountered various clusters, for which I calculated the marker genes. The top marker genes for each cluster are as follows:\n"
+  for(cl in unique(topmk$cluster)){
+    prompt = paste0(prompt, " - cluster ", cl, ": ", 
+                    paste0(topmk$gene[topmk$cluster==cl], collapse = ", "), "\n")
+  }
+  
+  if(!is.null(add_info)){
+    prompt = paste0(prompt, 
+                    "\nTo interpret these clusters, these additional sample characteristics should be considered: ", 
+                    paste0(sapply(names(add_info), function(x) paste0(x, ": ", add_info[x])), 
+                           collapse = "; "), "\n")
+  }
+  
+  prompt = paste0(prompt, 
+                  "Can you tell me what are the most likely cell types that each cluster matches to? And report the top 5 genes used to reach this annotation.")
+  
+  if(print.it){
+    cat(prompt)
+  }
+  return(prompt)
+}
+```
+
+```{r}
+annotationPrompt(merged_obj.markers, n = 25, pct_diff = 0.2, add_info = list('tissue' = 'blood'))
+```
+
+Define merged clusters
+
+```{r}
+#Create a new column with the new clusters
+
+new.cluster.ids <- c('CD4', 'CD4', 'NK', 'Mono-Mac', 'CD8', 'CD8', 'CD8', 'NK', 'B cells', 'CD8', 'CD8', 'CD4', 'B cells', 'CD4', 'Platelets', 'Mono-Mac', 'CD4', 'Mono-Mac', 'NK', 'NK', 'CD4', 'Erythrocytes', 'Granulocytes', 'DC', 'Epithelial cells', 'Endothelial cells')
+names(new.cluster.ids) <- levels(merged_obj)
+merged_obj <- RenameIdents(merged_obj, new.cluster.ids)
+merged_obj[['merged_idents']] <- Idents(merged_obj)
+DimPlot(merged_obj, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
+```
+
+```{r}
+saveRDS(merged_obj, file = "merged_integrated_annotated.rds")
+```
+
+**See conserved cell type markers across conditions**
+
+```{r}
+# NEEDS TO BE FIXED AND SET ORDER CORRECTLY
+markers.to.plot <- c("CD3D", "CREM", "HSPH1", "SELL", "GIMAP5", "CACYBP", "GNLY", "NKG7", "CCL5",
+    "CD8A", "MS4A1", "CD79A", "MIR155HG", "NME1", "FCGR3A", "VMO1", "CCL2", "S100A9", "HLA-DQA1",
+    "GPR183", "PPBP", "GNG11", "HBA2", "HBB", "TSPAN13", "IL3RA", "IGJ", "PRSS57")
+DotPlot(merged_obj, features = markers.to.plot, cols = c("blue", "red"), dot.scale = 8, split.by = "Condition", group.by = 'Ident', cluster.idents = T) +
+    RotatedAxis()
+```
+
+\
+
+```{r}
+# NEEDS TO BE FIXED AND SET ORDER CORRECTLY
+markers.to.plot <- c("CD3D", "CREM", "HSPH1", "SELL", "GIMAP5", "CACYBP", "GNLY", "NKG7", "CCL5",
+    "CD8A", "MS4A1", "CD79A", "MIR155HG", "NME1", "FCGR3A", "VMO1", "CCL2", "S100A9", "HLA-DQA1",
+    "GPR183", "PPBP", "GNG11", "HBA2", "HBB", "TSPAN13", "IL3RA", "IGJ", "PRSS57")
+DotPlot(merged_obj, features = markers.to.plot, cols = c("blue", "red"), dot.scale = 8, split.by = "Condition", cluster.idents = T) +
+    RotatedAxis()
+```
+
+**\
+**
+
+**Identify differential expressed genes across conditions**
+
+Compare gene expression profiles with and without disease - CD4 cells
+
+```{r}
+theme_set(theme_cowplot())
+
+aggregate_merged_obj <- AggregateExpression(merged_obj, group.by = c("merged_idents", "Condition"), return.seurat = TRUE)
+
+
+
+# Get the genes to laber according to a condition
+genes.to.label = ((LayerData(aggregate_merged_obj, assay = "RNA")[,17] > 2 &
+                     LayerData(aggregate_merged_obj, assay = "RNA")[,17] > 2 * LayerData(aggregate_merged_obj, assay = "RNA")[,18])) | 
+  (LayerData(aggregate_merged_obj, assay = "RNA")[,18] > 2 &
+     (LayerData(aggregate_merged_obj, assay = "RNA")[,18] > 2* LayerData(aggregate_merged_obj, assay = "RNA")[,17]) )
+
+genes.to.label <- rownames((LayerData(aggregate_merged_obj, assay = "RNA")))[genes.to.label]
+
+
+# Plots
+p1 <- CellScatter(aggregate_merged_obj, "Ephithelial cells_hc" , "Ephithelial cells_ss" , highlight = genes.to.label)
+p2 <- LabelPoints(plot = p1, points = genes.to.label, repel = TRUE)
+p2
+
+```
+
+Compare gene expression profiles with and without disease - All type cells
+
+```{r}
+theme_set(theme_cowplot())
+
+aggregate_merged_obj <- AggregateExpression(merged_obj, group.by = c("merged_idents", "Condition"), return.seurat = TRUE)
+
+#par(mfrow=c(3,3))
+mat <- LayerData(aggregate_merged_obj, assay = "RNA")
+colnames(mat) <- gsub('/', '_', colnames(mat), fixed = T)
+
+# Get a list with the object levels
+cond <-  colnames(mat)
+
+for (i in seq(1, length(cond), by = 2)) {
+  
+  genes.to.label = ((mat[,i] > 2 &
+                     mat[,i] > 2 * mat[,i+1])) |  
+  (mat[,i+1] > 2 &
+     (mat[,i+1] > 2* mat[,i]) )
+  
+  genes.to.label <- rownames(mat)[genes.to.label]
+  
+  p1 <- CellScatter(aggregate_merged_obj, cond[i], cond[i+1], highlight = genes.to.label)
+  p2 <- LabelPoints(plot = p1, points = genes.to.label, repel = TRUE)
+  show(p2)
+  name <- paste(c('GE_profile/', cond[i], '_vs_', cond[i+1], '.jpg'), collapse = '')
+  ggsave(filename = name, height = 7, width = 12, plot = p2, quality = 50)
+}
+
+```
+
+Differences in the same cell type
+
+```{r}
+merged_obj$celltype.Conditions <- paste(merged_obj$merged_idents, merged_obj$Condition, sep = "_")
+Idents(merged_obj) <- "celltype.Conditions"
+conds <- sort(levels(merged_obj))
+
+
+#merged_obj@assays$RNA@layers$counts <- round(merged_obj@assays$RNA@layers$counts)
+  
+for (i in seq(1, 8, by = 2)){
+response <- FindMarkers(merged_obj, ident.1 = conds[i+1], conds[i], verbose = FALSE)
+
+cell <- sub(c('_hc', '_ss'), '', conds[i])
+
+p <- EnhancedVolcano(response, lab = rownames(response), x = 'avg_log2FC', y = 'p_val_adj', pCutoff = 0.001, FCcutoff = 2.5, col = c('lightgrey', 'lightgrey','dodgerblue', 'firebrick1'), title = cell, labSize = 3)
+
+name <- paste(c('volcanos/Regressed/', conds[i], '_vs_', conds[i+1], '_v1_rc.jpg'), collapse = '' ) 
+ggsave(filename = name, height = 7, width = 12, plot = p, quality = 50)
+
+}
+
+for (i in seq(10, length(conds), by = 2)){
+response <- FindMarkers(merged_obj, ident.1 = conds[i+1], conds[i], verbose = FALSE)
+
+cell <- sub(c('_hc', '_ss'), '', conds[i])
+
+p <- EnhancedVolcano(response, lab = rownames(response), x = 'avg_log2FC', y = 'p_val_adj', pCutoff = 0.001, FCcutoff = 2.5, col = c('lightgrey', 'lightgrey','dodgerblue', 'firebrick1'), title = cell, labSize = 3)
+
+name <- paste(c('volcanos/Regressed/', conds[i], '_vs_', conds[i+1], '_v1_rc.jpg'), collapse = '' ) 
+ggsave(filename = name, height = 7, width = 12, plot = p, quality = 50)
+
+}
+```
+
+```{r}
+
+# Vocanos with scale data
+
+for (i in seq(1, 8, by = 2)){
+response <- FindMarkers(merged_obj, slot = 'scale.data', ident.1 = conds[i+1], conds[i], verbose = FALSE)
+
+cell <- sub(c('_hc', '_ss'), '', conds[i])
+
+p <- EnhancedVolcano(response, lab = rownames(response), x = 'avg_diff', y = 'p_val_adj', pCutoff = 0.001, FCcutoff = 0.5, col = c('lightgrey', 'lightgrey','dodgerblue', 'firebrick1'), title = cell, labSize = 3)
+
+name <- paste(c('volcanos/Regressed/', conds[i], '_vs_', conds[i+1], '_v2_rc.jpg'), collapse = '' ) 
+ggsave(filename = name, height = 7, width = 12, plot = p, quality = 50)
+
+}
+
+for (i in seq(10, length(conds), by = 2)){
+response <- FindMarkers(merged_obj, slot = 'scale.data', ident.1 = conds[i+1], conds[i], verbose = FALSE)
+
+cell <- sub(c('_hc', '_ss'), '', conds[i])
+
+p <- EnhancedVolcano(response, lab = rownames(response), x = 'avg_diff', y = 'p_val_adj', pCutoff = 0.001, FCcutoff = 0.5, col = c('lightgrey', 'lightgrey','dodgerblue', 'firebrick1'), title = cell, labSize = 3)
+
+name <- paste(c('volcanos/Regressed/', conds[i], '_vs_', conds[i+1], '_v2_rc.jpg'), collapse = '' ) 
+ggsave(filename = name, height = 7, width = 12, plot = p, quality = 50)
+
+}
+```
+
+```{r}
+# Vocanos with scale data - regresed counts
+
+merged_obj <- ScaleData(merged_obj, vars.to.regress = 'nCount_RNA', use.umi = T)
+
+for (i in seq(1, length(conds), by = 2)){
+response <- FindMarkers(merged_obj, slot = 'scale.data', ident.1 = conds[i+1], conds[i], verbose = FALSE)
+
+cell <- sub(c('_hc', '_ss'), '', conds[i])
+
+p <- EnhancedVolcano(response, lab = rownames(response), x = 'avg_diff', y = 'p_val_adj', pCutoff = 0.001, FCcutoff = 0.5, col = c('lightgrey', 'lightgrey','dodgerblue', 'firebrick1'), title = cell, labSize = 3)
+
+name <- paste(c('volcanos/', conds[i], '_vs_', conds[i+1], '_v3.jpg'), collapse = '' ) 
+ggsave(filename = name, height = 7, width = 12, plot = p, quality = 50)
+
+}
+```
+
+```{r}
+FeaturePlot(merged_obj, features = c("CD3D", "GNLY", "IFI6"), split.by = "Condition", max.cutoff = 3, cols = c("grey",
+    "red"), reduction = "umap")
+```
+
+```{r}
+plots <- VlnPlot(merged_obj, features = c("LYZ", "ISG15", "CD3D"), split.by = "Condition", group.by = "merged_idents",
+    pt.size = 0, combine = FALSE)
+wrap_plots(plots = plots, ncol = 1)
+```

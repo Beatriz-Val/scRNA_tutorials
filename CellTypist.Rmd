@@ -1,0 +1,50 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+library(Seurat)
+```
+
+```{r}
+pred_dic <- read.csv('pred_dic.csv', row.names = 1)
+```
+
+```{r}
+merged_obj <- readRDS('merged_integrated_annotated.rds')
+```
+
+```{r}
+  merged_obj = AddMetaData(merged_obj, metadata = pred_dic)
+
+```
+
+```{r}
+DimPlot(merged_obj, reduction = "umap", label = TRUE, pt.size = 0.5, group.by = 'predicted_labels' )
+```
+
+```{r}
+DimPlot(merged_obj, reduction = "umap", label = TRUE, pt.size = 0.5, group.by = 'majority_voting', repel = T)
+```
+
+```{r}
+saveRDS(merged_obj, file = "MERGED_NEW_ANNOTATION.rds")
+```
+
+```{r}
+merged_obj.markers <- FindAllMarkers(merged_obj, grouping.var = "Condition")
+```
+
+```{r}
+Idents(merged_obj) <- "majority_voting"
+merged.markers <- FindAllMarkers(merged_obj, grouping.var = "Condition")
+```
+
+```{r}
+
+write.table(merged_obj.markers, 'Markers.csv', row.names = F, col.names = T)
+
+write.table(merged.markers, 'Markers_SA.csv', row.names = F, col.names = T)
+
+```
